@@ -1,0 +1,140 @@
+---
+title: 'Predicting the next word: An initial analysis'
+author: "Sid Reddy"
+date: "March 29, 2015"
+output: html_document
+---
+
+## Executive Summary
+
+In this paper, we provide an initial analysis for the problem of predicting the next word that a person types on a computer keyboard. Addressing this problem will help us reduce a user's pain while typing on small mobile keyboards, for example. 
+
+## Data Acquisition and Cleaning
+We will first examine the corpus we have for the English language. We have three files representing blogs, news, and twitter feeds. Below is some preliminary metadata about the files obtained using the wc command. The first number is the number of lines, the second is the number of words, and the third is the number of characters in the corresponding files. 
+
+```{r cache=TRUE}
+# Get basic stats of each file (number of lines, words, characters)
+d1 <- system('wc -lwm final/en_US/en_US.blogs.txt', intern = TRUE)
+d2 <- system('wc -lwm final/en_US/en_US.news.txt', intern = TRUE)
+d3 <- system('wc -lwm final/en_US/en_US.twitter.txt', intern = TRUE)
+d1; d2; d3
+```
+
+For each of the files, we will pick a sample of 1% of the lines to build our model. Why do we choose 1%? Because, this will still give us a minimum of roughly 9000 samples per file, and is a large enough sample to be able to build accurate models (Note that any parameters estimated from the sample differ from that of the population with an error that is reduced by a factor of sqrt(9000) = `r sqrt(9000)`). We will also progressively increase the sample size later on, and check if that improves the accuracy. 
+
+Below, we will sample 1% of all the lines in the three files. First, we use the number of lines obtained above to construct a vector of sample lines, and read only those lines from the files. These lines are then stored in 3 sample files as shown below. We will use these sample files directly for the following exploratory data analysis, as well as building predictive models. 
+
+```{r cache=TRUE, warning=FALSE}
+# Get the number of lines in each file 
+library(stringr)
+nl1 <- as.integer(str_match(d1, '(\\d+)')[1, 2])
+nl2 <- as.integer(str_match(d2, '(\\d+)')[1, 2])
+nl3 <- as.integer(str_match(d3, '(\\d+)')[1, 2])
+
+# Generate line numbers which represent 1% of the samples
+set.seed(1234)
+s1 <- sort(sample(nl1, nl1 / 100))
+s2 <- sort(sample(nl2, nl2 / 100))
+s3 <- sort(sample(nl3, nl3 / 100))
+
+sampleFile <- function(fileInput, lineNumbers, fileOutput) {
+  # Open the file, and initialize the output
+  fi <- file(fileInput, 'r')
+  fo <- file(fileOutput, 'at')
+  output <- vector()
+  
+  # Read each of the lines, and store in output
+  prevLine <- 0
+  for(l in lineNumbers) {
+    line <- scan(fi, what = 'character', sep = '\n', nlines = 1, skip = l - prevLine - 1)
+    write(line, fo)
+    prevLine <- l
+  }
+  
+  # Close file connections
+  close(fi)
+  close(fo)
+}
+
+sampleFile('final/en_US/en_US.blogs.txt', s1, 'en_US.blogs.sample.txt')
+sampleFile('final/en_US/en_US.news.txt', s2, 'en_US.news.sample.txt')
+sampleFile('final/en_US/en_US.twitter.txt', s3, 'en_US.twitter.sample.txt')
+
+```
+
+## Exploratory Data Analysis
+We will perform our initial data analysis on the sample files above. We will remove numbers, punctuation, whitespace from the documents, and stem the words using the Porter stemmer (an old, basic yet effective stemmer) algorithm. We finally obtain the document vs term matrix as below. 
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+library(tm)
+library(SnowballC)
+corpus <- Corpus(DirSource(pattern = '.*\\.sample\\..*'))
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, stripWhitespace)
+corpus <- tm_map(corpus, stemDocument)
+dtm <- DocumentTermMatrix(corpus)
+```
+
+We now plot the word frequency distribution. We use the document term matrix obtained above, and retain only those words which have a frequency greater than 100 across the 3 files. The plot can be seen below
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+# Construct a data frame for plotting with ggplot
+m <- as.matrix(dtm)
+
+generateHistogram <- function(m, threshold, xlabel) {
+  df1 <- data.frame(words = names(m[1, ]), freq1 = m[1, ], freq2 = m[2, ], freq3 = m[3, ])
+  
+  # Consider only those words with a frequency > 100 across the 3 files 
+  library(dplyr)
+  df2 <- filter(df1, freq1 > threshold & freq2 > threshold & freq3 > threshold)
+  
+  # Plot the histogram (as lines) for each of the 3 files
+  library(ggplot2)
+  ggplot(data = df2, aes(x = words)) + 
+    geom_line(aes(y = freq1, group = 1, color = 'freq1')) + 
+    geom_line(aes(y = freq2, group = 1, color = 'freq2')) + 
+    geom_line(aes(y = freq3, group = 1, color = 'freq3')) + 
+    xlab(xlabel) + 
+    ylab('Frequency') 
+}
+
+generateHistogram(m, 100, 'Words')
+```
+
+We will now proceed to do a frequency analysis of bigrams, trigrams, and tetragrams (frequency of occurrence of two, three, four words respectively in a consecutive fashion in a sentence). First, we will generate a tokenizer for generating these n-grams. We then generate the DTM (Document Term Matrix using this tokenizer for each of the ngrams).
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+library(RWeka)
+options(mc.cores = 1) # This is required to address a nasty bug that prevents tokenization from happening
+
+# Generate bigrams that occur with a frequency > 100
+bigramTokenizer <- function(x) {
+  NGramTokenizer(x, Weka_control(min = 2, max = 2))
+}
+dtm2 <- DocumentTermMatrix(corpus, control = list(tokenize = bigramTokenizer))
+m2 <- as.matrix(dtm2)
+generateHistogram(m2, 100, 'Bigrams')
+
+# Generate trigrams that occur with a frequency > 100
+trigramTokenizer <- function(x) {
+  NGramTokenizer(x, Weka_control(min = 3, max = 3))
+}
+dtm3 <- DocumentTermMatrix(corpus, control = list(tokenize = trigramTokenizer))
+m3 <- as.matrix(dtm3)
+generateHistogram(m3, 100, 'Trigrams')
+
+# Generate tetragrams that occur with a frequency > 25
+tetragramTokenizer <- function(x) {
+  NGramTokenizer(x, Weka_control(min = 4, max = 4))
+}
+dtm4 <- DocumentTermMatrix(corpus, control = list(tokenize = tetragramTokenizer))
+m4 <- as.matrix(dtm4)
+generateHistogram(m4, 25, 'Tetragrams')
+
+```
+
+One interesting observation is that the twitter data differs slightly from the blogs/news data with respect to the frequency of the different ngrams.
+
+## Conclusion
+This was a preliminary analysis of the data sources we have for the English language. This exploratory analysis will soon help us build predictive models for what word a user will type next. 
